@@ -42,7 +42,7 @@
 static const char *TAG = "I2S";
 
 #define I2S_NUM         I2S_NUM_0
-#define DMA_BUF_COUNT   32
+#define DMA_BUF_COUNT   20
 #define DMA_BUF_LEN     1024
 
 static bool s_i2s_initialized = false;

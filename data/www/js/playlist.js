@@ -20,7 +20,7 @@ async function loadPlaylist() {
         headers: {
             'Content-Type': 'application/json',
         },
-        body: JSON.stringify('update')
+        body: 'update'
     }).catch(error => console.error('Ошибка при отправке команды обновления плейлиста:', error));
 
     const oldPlaylist = playlist.length > 0 ? [...playlist] : JSON.parse(localStorage.getItem('playlistCache') || '[]');
