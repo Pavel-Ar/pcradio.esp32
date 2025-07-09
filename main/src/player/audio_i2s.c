@@ -13,10 +13,10 @@
 #include "config.h"
 
 // Отключаем неиспользуемые функции для экономии IRAM
-#define ENABLE_AUDIO_FILTERING 0        // Отключено для экономии
-#define ENABLE_DITHERING 0             // Отключено для экономии
-#define ENABLE_EXPANDER_GATE 0         // Отключено для экономии
-#define ENABLE_HIGH_FREQ_NOISE_REDUCTION 0  // Отключено для экономии
+#define ENABLE_AUDIO_FILTERING 1
+#define ENABLE_DITHERING 1
+#define ENABLE_EXPANDER_GATE 1
+#define ENABLE_HIGH_FREQ_NOISE_REDUCTION 1
 
 // Параметры фильтрации для улучшения качества звука
 #define FILTER_STRENGTH 0.1f                                      // Сила фильтра (0.0-1.0), чем выше, тем более сглаженный звук
@@ -39,16 +39,16 @@
 #define HIGH_FREQ_NOISE_REDUCTION_RATIO 0.4f                      // Коэффициент подавления для высоких частот 0.8f
 
 // Оптимизируем DMA буферы для экономии DIRAM
-#define DMA_BUF_COUNT   20   // Было: 18, экономим ~40KB DIRAM
-#define DMA_BUF_LEN     1024 // Было: 1024, экономим еще ~20KB DIRAM
+#define DMA_BUF_COUNT   20
+#define DMA_BUF_LEN     1024
 
 // Уменьшаем размер буферов для экономии DIRAM
-#define NOISE_FILTER_BUFFER_SIZE 128  // Было: 256, стало: 128 (-512 байт DIRAM)
+#define NOISE_FILTER_BUFFER_SIZE 128
 
 // Максимальный размер буфера для использования stack вместо heap
-#define MAX_STACK_BUFFER_SIZE 1024    // Было: 2048, уменьшаем для экономии стека
+#define MAX_STACK_BUFFER_SIZE 1024
 
-// Переносим буферы в PSRAM (если доступна) или делаем их динамическими
+// Буферы в PSRAM (если доступна) или динамические
 static int16_t *s_noise_filter_left_buffer = NULL;
 static int16_t *s_noise_filter_right_buffer = NULL;
 static size_t s_noise_filter_index = 0;
@@ -195,12 +195,11 @@ esp_err_t audio_i2s_init(uint32_t sample_rate, uint8_t bits_per_sample, uint8_t 
         }
     }
 
-    // Проверяем доступную память перед инициализацией
     size_t free_heap = esp_get_free_heap_size();
     size_t free_iram = heap_caps_get_free_size(MALLOC_CAP_32BIT);
     ESP_LOGI(TAG, "Free memory before I2S init: heap=%zu, IRAM=%zu", free_heap, free_iram);
 
-    if (free_iram < 8192) {  // Меньше 8KB свободной IRAM
+    if (free_iram < 8192) {
         ESP_LOGE(TAG, "Insufficient IRAM memory: %zu bytes (need at least 8192)", free_iram);
         return ESP_ERR_NO_MEM;
     }
@@ -301,7 +300,6 @@ esp_err_t audio_i2s_init(uint32_t sample_rate, uint8_t bits_per_sample, uint8_t 
     s_prev_left_sample = 0;
     s_prev_right_sample = 0;
 
-    // Освобождаем старые буферы если есть
     if (s_noise_filter_left_buffer) {
         heap_caps_free(s_noise_filter_left_buffer);
         s_noise_filter_left_buffer = NULL;
@@ -311,12 +309,9 @@ esp_err_t audio_i2s_init(uint32_t sample_rate, uint8_t bits_per_sample, uint8_t 
         s_noise_filter_right_buffer = NULL;
     }
 
-    // Выделяем буферы только если функции шумоподавления включены
     #if ENABLE_HIGH_FREQ_NOISE_REDUCTION
-    // Выделяем буферы в PSRAM
     s_noise_filter_left_buffer = heap_caps_malloc(NOISE_FILTER_BUFFER_SIZE * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     if (!s_noise_filter_left_buffer) {
-        // Fallback на обычную память
         s_noise_filter_left_buffer = malloc(NOISE_FILTER_BUFFER_SIZE * sizeof(int16_t));
         if (!s_noise_filter_left_buffer) {
             ESP_LOGE(TAG, "Failed to allocate noise filter left buffer");
@@ -329,7 +324,6 @@ esp_err_t audio_i2s_init(uint32_t sample_rate, uint8_t bits_per_sample, uint8_t 
 
     s_noise_filter_right_buffer = heap_caps_malloc(NOISE_FILTER_BUFFER_SIZE * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     if (!s_noise_filter_right_buffer) {
-        // Fallback на обычную память
         s_noise_filter_right_buffer = malloc(NOISE_FILTER_BUFFER_SIZE * sizeof(int16_t));
         if (!s_noise_filter_right_buffer) {
             ESP_LOGE(TAG, "Failed to allocate noise filter right buffer");
@@ -342,7 +336,6 @@ esp_err_t audio_i2s_init(uint32_t sample_rate, uint8_t bits_per_sample, uint8_t 
         ESP_LOGI(TAG, "Noise filter right buffer allocated in PSRAM");
     }
 
-    // Инициализируем буферы
     memset(s_noise_filter_left_buffer, 0, NOISE_FILTER_BUFFER_SIZE * sizeof(int16_t));
     memset(s_noise_filter_right_buffer, 0, NOISE_FILTER_BUFFER_SIZE * sizeof(int16_t));
     s_noise_filter_index = 0;
@@ -357,7 +350,6 @@ esp_err_t audio_i2s_init(uint32_t sample_rate, uint8_t bits_per_sample, uint8_t 
 
     apply_stored_audio_settings(sample_rate, bits_per_sample, channels);
 
-    // Проверяем память после инициализации
     free_heap = esp_get_free_heap_size();
     free_iram = heap_caps_get_free_size(MALLOC_CAP_32BIT);
     ESP_LOGI(TAG, "Free memory after I2S init: heap=%zu, IRAM=%zu", free_heap, free_iram);
@@ -640,7 +632,7 @@ esp_err_t audio_i2s_write(const void *data, size_t size, size_t *bytes_written, 
 
     esp_err_t ret;
     const void *data_to_write = data;
-    void *heap_buffer = NULL;  // Только для heap буферов
+    void *heap_buffer = NULL;
     bool using_heap_buffer = false;
 
     bool alc_conditions_met = s_alc_enabled && s_current_alc_cfg &&
@@ -656,13 +648,11 @@ esp_err_t audio_i2s_write(const void *data, size_t size, size_t *bytes_written, 
 
     if (alc_conditions_met || volume_conditions_met || eq_conditions_met) {
         if (size <= MAX_STACK_BUFFER_SIZE) {
-            // Используем stack для малых буферов
             uint8_t stack_buffer[MAX_STACK_BUFFER_SIZE];
             memcpy(stack_buffer, data, size);
             data_to_write = stack_buffer;
-            using_heap_buffer = false;  // Stack буфер - не освобождаем
+            using_heap_buffer = false;
 
-            // Обработка ALC для stack буфера
             if (alc_conditions_met) {
                 if (s_alc_mutex && xSemaphoreTake(s_alc_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
                     size_t num_frames_alc = size / (s_current_alc_cfg->bits_per_sample / 8) / s_current_alc_cfg->channels;
@@ -678,7 +668,6 @@ esp_err_t audio_i2s_write(const void *data, size_t size, size_t *bytes_written, 
                 }
             }
 
-            // Обработка громкости и фильтрации для stack буфера
             if (volume_conditions_met) {
                 int16_t *samples = (int16_t *)stack_buffer;
                 size_t num_samples_vol = size / sizeof(int16_t);
@@ -711,7 +700,6 @@ esp_err_t audio_i2s_write(const void *data, size_t size, size_t *bytes_written, 
                          s_current_bits_per_sample);
             }
 
-            // Обработка EQ для stack буфера
             if (eq_conditions_met) {
                 if (s_eq_mutex && xSemaphoreTake(s_eq_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
                     size_t num_frames_eq = size / (s_current_eq_cfg->bits_per_sample / 8) / s_current_eq_cfg->channel;
@@ -728,7 +716,6 @@ esp_err_t audio_i2s_write(const void *data, size_t size, size_t *bytes_written, 
             }
 
         } else {
-            // Для больших буферов используем heap
             heap_buffer = malloc(size);
             if (!heap_buffer) {
                 ESP_LOGE(TAG, "Failed to allocate temporary buffer for audio processing");
@@ -737,9 +724,8 @@ esp_err_t audio_i2s_write(const void *data, size_t size, size_t *bytes_written, 
             }
             memcpy(heap_buffer, data, size);
             data_to_write = heap_buffer;
-            using_heap_buffer = true;  // Heap буфер - освобождаем
+            using_heap_buffer = true;
 
-            // Обработка ALC для heap буфера
             if (alc_conditions_met) {
                 if (s_alc_mutex && xSemaphoreTake(s_alc_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
                     size_t num_frames_alc = size / (s_current_alc_cfg->bits_per_sample / 8) / s_current_alc_cfg->channels;
@@ -755,7 +741,6 @@ esp_err_t audio_i2s_write(const void *data, size_t size, size_t *bytes_written, 
                 }
             }
 
-            // Обработка громкости и фильтрации для heap буфера
             if (volume_conditions_met) {
                 int16_t *samples = (int16_t *)heap_buffer;
                 size_t num_samples_vol = size / sizeof(int16_t);
@@ -788,7 +773,6 @@ esp_err_t audio_i2s_write(const void *data, size_t size, size_t *bytes_written, 
                          s_current_bits_per_sample);
             }
 
-            // Обработка EQ для heap буфера
             if (eq_conditions_met) {
                 if (s_eq_mutex && xSemaphoreTake(s_eq_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
                     size_t num_frames_eq = size / (s_current_eq_cfg->bits_per_sample / 8) / s_current_eq_cfg->channel;
@@ -812,7 +796,6 @@ esp_err_t audio_i2s_write(const void *data, size_t size, size_t *bytes_written, 
                  esp_err_to_name(ret), bytes_written ? *bytes_written : 0, size);
     }
 
-    // Освобождаем память только если это был heap буфер
     if (using_heap_buffer && heap_buffer) {
         free(heap_buffer);
     }
@@ -876,7 +859,6 @@ esp_err_t audio_i2s_deinit(void) {
     }
     alc_deinit();
 
-    // Освобождаем буферы шумоподавления
     if (s_noise_filter_left_buffer) {
         heap_caps_free(s_noise_filter_left_buffer);
         s_noise_filter_left_buffer = NULL;

@@ -50,7 +50,6 @@ static esp_err_t add_channel_to_index(long inf_offset) {
 static esp_err_t download_playlist_file() {
     ESP_LOGI(TAG, "Starting playlist download from %s", PLAYLIST_URL);
 
-    // Освобождаем старый индекс перед загрузкой нового плейлиста
     if (s_channel_index) {
         heap_caps_free(s_channel_index);
         s_channel_index = NULL;
@@ -62,10 +61,10 @@ static esp_err_t download_playlist_file() {
         .url = PLAYLIST_URL,
         .use_global_ca_store = false,
         .skip_cert_common_name_check = true,
-        .timeout_ms = 60000,  // Увеличиваем таймаут до 60 секунд
-        .buffer_size = 4096,   // Увеличиваем размер буфера
+        .timeout_ms = 30000,
+        .buffer_size = 4096,
         .transport_type = HTTP_TRANSPORT_OVER_SSL,
-        .keep_alive_enable = false,  // Отключаем keep-alive для надежности
+        .keep_alive_enable = false,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -74,7 +73,6 @@ static esp_err_t download_playlist_file() {
         return ESP_FAIL;
     }
 
-    // Добавляем повторные попытки соединения
     esp_err_t err = ESP_FAIL;
     int retry_count = 0;
     const int max_retries = 3;
@@ -90,7 +88,7 @@ static esp_err_t download_playlist_file() {
         if (retry_count < max_retries) {
             ESP_LOGW(TAG, "Connection failed (attempt %d/%d): %s. Retrying in 2 seconds...",
                      retry_count, max_retries, esp_err_to_name(err));
-            vTaskDelay(pdMS_TO_TICKS(2000));  // Ждем 2 секунды перед повтором
+            vTaskDelay(pdMS_TO_TICKS(2000));
         }
     }
 
@@ -120,7 +118,7 @@ static esp_err_t download_playlist_file() {
         return ESP_FAIL;
     }
 
-    char buffer[2048];  // Увеличиваем буфер для более эффективного чтения
+    char buffer[2048];
     int total_read_len = 0;
     int read_len;
     err = ESP_OK;
@@ -148,7 +146,6 @@ static esp_err_t download_playlist_file() {
         }
         total_read_len += read_len;
 
-        // Периодически отдаем управление планировщику задач
         if (total_read_len % 8192 == 0) {
             vTaskDelay(pdMS_TO_TICKS(1));
         }
@@ -162,12 +159,11 @@ static esp_err_t download_playlist_file() {
     }
 
     fclose(f);
-    f = NULL;  // Сбрасываем указатель после закрытия
+    f = NULL;
 
-    // Правильно закрываем HTTP соединение
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    client = NULL;  // Сбрасываем указатель после очистки
+    client = NULL;
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Playlist download failed. Deleting partial file.");
@@ -177,7 +173,6 @@ static esp_err_t download_playlist_file() {
 
     if (content_length > 0 && total_read_len != content_length) {
         ESP_LOGW(TAG, "Downloaded size mismatch. Read: %d, Expected: %d. File might be incomplete.", total_read_len, content_length);
-        // Проверяем, что файл имеет минимальный разумный размер
         if (total_read_len < 1000) {
             ESP_LOGE(TAG, "Downloaded file too small (%d bytes), probably incomplete. Deleting.", total_read_len);
             remove(PLAYLIST_FILENAME);
@@ -187,7 +182,6 @@ static esp_err_t download_playlist_file() {
 
     ESP_LOGI(TAG, "Playlist downloaded successfully to %s (%d bytes)", PLAYLIST_FILENAME, total_read_len);
 
-    // Принудительно освобождаем память после загрузки
     if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < heap_caps_get_total_size(MALLOC_CAP_SPIRAM) * 0.1) {
         ESP_LOGW(TAG, "Low PSRAM memory after download, forcing garbage collection");
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -207,7 +201,6 @@ static esp_err_t index_playlist_file() {
     char line[MAX_LINE_LENGTH];
     long current_offset = 0;
 
-    // Освобождаем старый индекс, если он существует
     if (s_channel_index) {
         heap_caps_free(s_channel_index);
         s_channel_index = NULL;
@@ -221,7 +214,6 @@ static esp_err_t index_playlist_file() {
             esp_err_t add_err = add_channel_to_index(current_offset);
             if (add_err != ESP_OK) {
                 fclose(f);
-                // Освобождаем память при ошибке
                 if (s_channel_index) {
                     heap_caps_free(s_channel_index);
                     s_channel_index = NULL;
@@ -233,7 +225,6 @@ static esp_err_t index_playlist_file() {
         }
         current_offset = ftell(f);
 
-        // Отдаем управление планировщику каждые 100 строк
         if (s_channel_count % 100 == 0) {
             vTaskDelay(pdMS_TO_TICKS(1));
         }
@@ -243,7 +234,6 @@ static esp_err_t index_playlist_file() {
     ESP_LOGI(TAG, "Playlist indexed. Found %d channels.", s_channel_count);
     if (s_channel_count == 0) {
         ESP_LOGW(TAG, "No channels found during indexing. Playlist might be empty or malformed.");
-        // Освобождаем память если каналов не найдено
         if (s_channel_index) {
             heap_caps_free(s_channel_index);
             s_channel_index = NULL;
@@ -262,13 +252,11 @@ static esp_err_t index_playlist_file() {
 esp_err_t playlist_update_sync(void) {
     ESP_LOGI(TAG, "Force updating playlist...");
 
-    // Сохраняем старое состояние на случай ошибки
     playlist_index_entry_t *old_index = s_channel_index;
     int old_count = s_channel_count;
     int old_capacity = s_channel_capacity;
     bool old_initialized = s_playlist_initialized;
 
-    // Временно сбрасываем состояние
     s_channel_index = NULL;
     s_channel_count = 0;
     s_channel_capacity = 0;
@@ -277,7 +265,6 @@ esp_err_t playlist_update_sync(void) {
     esp_err_t err_download = download_playlist_file();
     if (err_download != ESP_OK) {
         ESP_LOGE(TAG, "Failed to download new playlist during update.");
-        // Восстанавливаем старое состояние
         s_channel_index = old_index;
         s_channel_count = old_count;
         s_channel_capacity = old_capacity;
@@ -288,7 +275,6 @@ esp_err_t playlist_update_sync(void) {
     esp_err_t err_index = index_playlist_file();
     if (err_index != ESP_OK) {
         ESP_LOGE(TAG, "Failed to index new playlist during update.");
-        // Восстанавливаем старое состояние
         s_channel_index = old_index;
         s_channel_count = old_count;
         s_channel_capacity = old_capacity;
@@ -296,7 +282,6 @@ esp_err_t playlist_update_sync(void) {
         return err_index;
     }
 
-    // Успешно обновились - освобождаем старые данные
     if (old_index) {
         heap_caps_free(old_index);
     }
@@ -304,7 +289,6 @@ esp_err_t playlist_update_sync(void) {
     ESP_LOGI(TAG, "Playlist updated and re-indexed successfully. Channels: %d", s_channel_count);
     s_playlist_initialized = true;
 
-    // Принудительно освобождаем неиспользуемую память
     vTaskDelay(pdMS_TO_TICKS(100));
 
     return ESP_OK;
