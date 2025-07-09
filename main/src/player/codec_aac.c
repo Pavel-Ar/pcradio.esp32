@@ -51,30 +51,42 @@ esp_err_t codec_aac_init_buffers(uint32_t raw_buffer_capacity) {
 }
 
 void codec_aac_deinit_buffers() {
+    ESP_LOGI(TAG, "Deinitializing AAC buffers...");
+
     if (s_codec_aac_raw_buffer.buffer) {
         heap_caps_free(s_codec_aac_raw_buffer.buffer);
         s_codec_aac_raw_buffer.buffer = NULL;
+        ESP_LOGI(TAG, "AAC raw data buffer freed");
     }
+    // Сбрасываем все поля структуры
     s_codec_aac_raw_buffer.capacity = 0;
     s_codec_aac_raw_buffer.size = 0;
-    ESP_LOGI(TAG, "AAC raw data buffer deinitialized");
 
     if (s_codec_aac_pcm_buffer) {
         heap_caps_free(s_codec_aac_pcm_buffer);
         s_codec_aac_pcm_buffer = NULL;
+        ESP_LOGI(TAG, "AAC PCM buffer freed");
     }
-    ESP_LOGI(TAG, "AAC PCM buffer deinitialized");
+
+    ESP_LOGI(TAG, "AAC buffers deinitialization completed");
 }
 
+// Добавляем проверку валидности буферов
 esp_err_t codec_aac_add_data(const uint8_t* data, uint32_t len) {
+    if (!data || len == 0) {
+        ESP_LOGW(TAG, "Invalid data parameters: data=%p, len=%" PRIu32, data, len);
+        return ESP_ERR_INVALID_ARG;
+    }
+
     if (!s_codec_aac_raw_buffer.buffer) {
         ESP_LOGE(TAG, "AAC raw buffer not initialized.");
-        return ESP_FAIL;
+        return ESP_ERR_INVALID_STATE;
     }
+
     if (s_codec_aac_raw_buffer.size + len > s_codec_aac_raw_buffer.capacity) {
         ESP_LOGE(TAG, "AAC raw buffer overflow. Current size: %" PRIu32 ", trying to add: %" PRIu32 ", capacity: %" PRIu32,
                  s_codec_aac_raw_buffer.size, len, s_codec_aac_raw_buffer.capacity);
-        return ESP_FAIL;
+        return ESP_ERR_NO_MEM;
     }
 
     memcpy(s_codec_aac_raw_buffer.buffer + s_codec_aac_raw_buffer.size, data, len);
@@ -210,14 +222,19 @@ esp_err_t codec_aac_process_data(esp_audio_dec_handle_t dec_handle, const uint8_
     return ESP_OK;
 }
 
+// Добавляем статическую переменную для отслеживания состояния
+static bool s_aac_decoder_registered = false;
+
 esp_err_t codec_init_aac_decoder(void) {
     ESP_LOGI(TAG, "Registering AAC decoder with the system.");
     esp_audio_err_t ret = esp_aac_dec_register();
     if (ret != ESP_AUDIO_ERR_OK && ret != ESP_AUDIO_ERR_ALREADY_EXIST) {
         ESP_LOGE(TAG, "Failed to register AAC decoder: %d (%s)", ret, esp_err_to_name(ret));
+        s_aac_decoder_registered = false;
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "AAC decoder registered successfully or was already registered.");
+    s_aac_decoder_registered = true;
     return ESP_OK;
 }
 
@@ -271,16 +288,51 @@ esp_err_t codec_aac_get_stream_info(esp_audio_dec_handle_t handle, int *out_samp
     return ESP_OK;
 }
 
+esp_err_t codec_aac_close_decoder(esp_audio_dec_handle_t handle) {
+    if (handle == NULL) {
+        ESP_LOGW(TAG, "AAC decoder handle is NULL, nothing to close");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Closing AAC decoder handle: %p", handle);
+
+    // Используем try-catch подобную конструкцию для безопасности
+    ESP_LOGI(TAG, "Attempting to close AAC decoder...");
+    esp_audio_dec_close(handle);  // Функция возвращает void
+    ESP_LOGI(TAG, "AAC decoder closed successfully");
+
+    return ESP_OK;
+}
+
 esp_err_t codec_aac_unregister_decoder(void) {
+    if (!s_aac_decoder_registered) {
+        ESP_LOGI(TAG, "AAC decoder was not registered, skipping unregister");
+        return ESP_OK;
+    }
+
     ESP_LOGI(TAG, "Unregistering AAC decoder from the system.");
-    esp_audio_dec_unregister(ESP_AUDIO_TYPE_AAC);
-    ESP_LOGI(TAG, "AAC decoder unregistration attempted.");
+
+    // Безопасно разрегистрируем
+    ESP_LOGI(TAG, "Attempting to unregister AAC decoder...");
+    esp_audio_dec_unregister(ESP_AUDIO_TYPE_AAC);  // Функция возвращает void
+    ESP_LOGI(TAG, "AAC decoder unregistered successfully");
+
+    s_aac_decoder_registered = false;
     return ESP_OK;
 }
 
 esp_err_t codec_deinit_aac_decoder(void) {
-    ESP_LOGI(TAG, "Unregistering AAC decoder from the system.");
-    esp_audio_dec_unregister(ESP_AUDIO_TYPE_AAC);
-    ESP_LOGI(TAG, "AAC decoder unregistration attempted.");
+    ESP_LOGI(TAG, "Deinitializing AAC decoder...");
+
+    // Сначала очищаем буферы
+    codec_aac_deinit_buffers();
+
+    // Затем разрегистрируем декодер
+    esp_err_t ret = codec_aac_unregister_decoder();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to unregister AAC decoder during deinit: %s", esp_err_to_name(ret));
+    }
+
+    ESP_LOGI(TAG, "AAC decoder deinitialization completed");
     return ESP_OK;
 }

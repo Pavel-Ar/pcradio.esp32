@@ -22,6 +22,7 @@ void codec_aac_deinit_buffers(void);
 esp_err_t codec_aac_process_data(esp_audio_dec_handle_t dec_handle, const uint8_t* data, uint32_t len);
 esp_err_t codec_aac_unregister_decoder(void);
 esp_err_t codec_deinit_aac_decoder(void);
+esp_err_t codec_aac_close_decoder(esp_audio_dec_handle_t handle);
 
 #ifdef __cplusplus
 }

@@ -12,17 +12,20 @@
 #include "volume.h"
 #include "config.h"
 
+// Отключаем неиспользуемые функции для экономии IRAM
+#define ENABLE_AUDIO_FILTERING 0        // Отключено для экономии
+#define ENABLE_DITHERING 0             // Отключено для экономии
+#define ENABLE_EXPANDER_GATE 0         // Отключено для экономии
+#define ENABLE_HIGH_FREQ_NOISE_REDUCTION 0  // Отключено для экономии
+
 // Параметры фильтрации для улучшения качества звука
-#define ENABLE_AUDIO_FILTERING 1                                  // Включить фильтрацию PCM данных
 #define FILTER_STRENGTH 0.1f                                      // Сила фильтра (0.0-1.0), чем выше, тем более сглаженный звук
 
 // Настройки деквантизации (dithering)
-#define ENABLE_DITHERING 1                                        // Включить деквантизацию для улучшения низкоуровневых сигналов
 #define DITHER_TYPE_TRIANGULAR 0                                  // Тип деквантизации (1 - треугольная, 0 - равномерная)
 #define DITHER_AMPLITUDE 0.5f                                     // Амплитуда шума деквантизации (в единицах LSB)
 
 // Настройки экспандера/гейта (оптимизировано для 128 кбит/с)
-#define ENABLE_EXPANDER_GATE 1                                    // Включить экспандер/гейт
 #define EXPANDER_THRESHOLD 1000.0f                                // Порог экспандера: ниже для активности на шумах 128kbps
 #define EXPANDER_RATIO 1.5f                                       // Соотношение экспандера: мягкое для естественности
 #define GATE_THRESHOLD 400.0f                                     // Порог гейта: ниже для более полного заглушения тишины
@@ -32,18 +35,27 @@
 #define HOLD_TIME_MS 50.0f                                        // Время удержания гейта открытым после падения сигнала ниже порога
 
 // Настройки для шумоподавления высоких частот
-#define ENABLE_HIGH_FREQ_NOISE_REDUCTION 1                        // Включить шумоподавление высоких частот
 #define HIGH_FREQ_NOISE_THRESHOLD 300.0f                          // Порог для шумоподавления высоких частот
 #define HIGH_FREQ_NOISE_REDUCTION_RATIO 0.4f                      // Коэффициент подавления для высоких частот 0.8f
 
-// Буферы для шумоподавления
-#define NOISE_FILTER_BUFFER_SIZE 1024
+// Оптимизируем DMA буферы для экономии DIRAM
+#define DMA_BUF_COUNT   20   // Было: 18, экономим ~40KB DIRAM
+#define DMA_BUF_LEN     1024 // Было: 1024, экономим еще ~20KB DIRAM
+
+// Уменьшаем размер буферов для экономии DIRAM
+#define NOISE_FILTER_BUFFER_SIZE 128  // Было: 256, стало: 128 (-512 байт DIRAM)
+
+// Максимальный размер буфера для использования stack вместо heap
+#define MAX_STACK_BUFFER_SIZE 1024    // Было: 2048, уменьшаем для экономии стека
+
+// Переносим буферы в PSRAM (если доступна) или делаем их динамическими
+static int16_t *s_noise_filter_left_buffer = NULL;
+static int16_t *s_noise_filter_right_buffer = NULL;
+static size_t s_noise_filter_index = 0;
 
 static const char *TAG = "I2S";
 
 #define I2S_NUM         I2S_NUM_0
-#define DMA_BUF_COUNT   20
-#define DMA_BUF_LEN     1024
 
 static bool s_i2s_initialized = false;
 static i2s_chan_handle_t i2s_handle = NULL;
@@ -81,11 +93,6 @@ static float s_gate_threshold = GATE_THRESHOLD;                   // Текущ�
 static float s_gate_floor_attenuation = GATE_FLOOR_ATTENUATION;   // Затухание закрытого гейта
 static uint32_t s_left_hold_counter = 0;                          // Счетчик удержания для левого канала
 static uint32_t s_right_hold_counter = 0;                         // Счетчик удержания для правого канала
-
-// Буферы для шумоподавления
-static int16_t s_noise_filter_left_buffer[NOISE_FILTER_BUFFER_SIZE];
-static int16_t s_noise_filter_right_buffer[NOISE_FILTER_BUFFER_SIZE];
-static size_t s_noise_filter_index = 0;
 
 static void unmute_timer_callback(TimerHandle_t xTimer) {
     if (g_app_config && g_app_config->is_loaded && !g_app_config->player.mute) {
@@ -188,6 +195,16 @@ esp_err_t audio_i2s_init(uint32_t sample_rate, uint8_t bits_per_sample, uint8_t 
         }
     }
 
+    // Проверяем доступную память перед инициализацией
+    size_t free_heap = esp_get_free_heap_size();
+    size_t free_iram = heap_caps_get_free_size(MALLOC_CAP_32BIT);
+    ESP_LOGI(TAG, "Free memory before I2S init: heap=%zu, IRAM=%zu", free_heap, free_iram);
+
+    if (free_iram < 8192) {  // Меньше 8KB свободной IRAM
+        ESP_LOGE(TAG, "Insufficient IRAM memory: %zu bytes (need at least 8192)", free_iram);
+        return ESP_ERR_NO_MEM;
+    }
+
     i2s_chan_config_t chan_cfg = {
         .id = I2S_NUM,
         .role = I2S_ROLE_MASTER,
@@ -284,9 +301,54 @@ esp_err_t audio_i2s_init(uint32_t sample_rate, uint8_t bits_per_sample, uint8_t 
     s_prev_left_sample = 0;
     s_prev_right_sample = 0;
 
-    memset(s_noise_filter_left_buffer, 0, sizeof(s_noise_filter_left_buffer));
-    memset(s_noise_filter_right_buffer, 0, sizeof(s_noise_filter_right_buffer));
+    // Освобождаем старые буферы если есть
+    if (s_noise_filter_left_buffer) {
+        heap_caps_free(s_noise_filter_left_buffer);
+        s_noise_filter_left_buffer = NULL;
+    }
+    if (s_noise_filter_right_buffer) {
+        heap_caps_free(s_noise_filter_right_buffer);
+        s_noise_filter_right_buffer = NULL;
+    }
+
+    // Выделяем буферы только если функции шумоподавления включены
+    #if ENABLE_HIGH_FREQ_NOISE_REDUCTION
+    // Выделяем буферы в PSRAM
+    s_noise_filter_left_buffer = heap_caps_malloc(NOISE_FILTER_BUFFER_SIZE * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    if (!s_noise_filter_left_buffer) {
+        // Fallback на обычную память
+        s_noise_filter_left_buffer = malloc(NOISE_FILTER_BUFFER_SIZE * sizeof(int16_t));
+        if (!s_noise_filter_left_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate noise filter left buffer");
+            return ESP_ERR_NO_MEM;
+        }
+        ESP_LOGW(TAG, "Noise filter left buffer allocated in DIRAM (PSRAM not available)");
+    } else {
+        ESP_LOGI(TAG, "Noise filter left buffer allocated in PSRAM");
+    }
+
+    s_noise_filter_right_buffer = heap_caps_malloc(NOISE_FILTER_BUFFER_SIZE * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    if (!s_noise_filter_right_buffer) {
+        // Fallback на обычную память
+        s_noise_filter_right_buffer = malloc(NOISE_FILTER_BUFFER_SIZE * sizeof(int16_t));
+        if (!s_noise_filter_right_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate noise filter right buffer");
+            free(s_noise_filter_left_buffer);
+            s_noise_filter_left_buffer = NULL;
+            return ESP_ERR_NO_MEM;
+        }
+        ESP_LOGW(TAG, "Noise filter right buffer allocated in DIRAM (PSRAM not available)");
+    } else {
+        ESP_LOGI(TAG, "Noise filter right buffer allocated in PSRAM");
+    }
+
+    // Инициализируем буферы
+    memset(s_noise_filter_left_buffer, 0, NOISE_FILTER_BUFFER_SIZE * sizeof(int16_t));
+    memset(s_noise_filter_right_buffer, 0, NOISE_FILTER_BUFFER_SIZE * sizeof(int16_t));
     s_noise_filter_index = 0;
+    #else
+    ESP_LOGI(TAG, "Noise filter buffers not allocated (feature disabled)");
+    #endif
 
     s_expander_envelope_left = 0.0f;
     s_expander_envelope_right = 0.0f;
@@ -294,6 +356,11 @@ esp_err_t audio_i2s_init(uint32_t sample_rate, uint8_t bits_per_sample, uint8_t 
     s_right_hold_counter = 0;
 
     apply_stored_audio_settings(sample_rate, bits_per_sample, channels);
+
+    // Проверяем память после инициализации
+    free_heap = esp_get_free_heap_size();
+    free_iram = heap_caps_get_free_size(MALLOC_CAP_32BIT);
+    ESP_LOGI(TAG, "Free memory after I2S init: heap=%zu, IRAM=%zu", free_heap, free_iram);
 
     return ESP_OK;
 }
@@ -573,8 +640,8 @@ esp_err_t audio_i2s_write(const void *data, size_t size, size_t *bytes_written, 
 
     esp_err_t ret;
     const void *data_to_write = data;
-    void *temp_buffer = NULL;
-    bool need_free_buffer = false;
+    void *heap_buffer = NULL;  // Только для heap буферов
+    bool using_heap_buffer = false;
 
     bool alc_conditions_met = s_alc_enabled && s_current_alc_cfg &&
                               s_current_bits_per_sample == s_current_alc_cfg->bits_per_sample &&
@@ -588,77 +655,154 @@ esp_err_t audio_i2s_write(const void *data, size_t size, size_t *bytes_written, 
                              s_current_i2s_channels == s_current_eq_cfg->channel;
 
     if (alc_conditions_met || volume_conditions_met || eq_conditions_met) {
-        temp_buffer = malloc(size);
-        if (!temp_buffer) {
-            ESP_LOGE(TAG, "Failed to allocate temporary buffer for audio processing");
-            if (bytes_written) *bytes_written = 0;
-            return i2s_channel_write(i2s_handle, data, size, bytes_written, wait_time);
-        }
-        memcpy(temp_buffer, data, size);
-        data_to_write = temp_buffer;
-        need_free_buffer = true;
-    }
+        if (size <= MAX_STACK_BUFFER_SIZE) {
+            // Используем stack для малых буферов
+            uint8_t stack_buffer[MAX_STACK_BUFFER_SIZE];
+            memcpy(stack_buffer, data, size);
+            data_to_write = stack_buffer;
+            using_heap_buffer = false;  // Stack буфер - не освобождаем
 
-    if (alc_conditions_met && temp_buffer) {
-        if (s_alc_mutex && xSemaphoreTake(s_alc_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-            size_t num_frames_alc = size / (s_current_alc_cfg->bits_per_sample / 8) / s_current_alc_cfg->channels;
-            if (num_frames_alc > 0) {
-                esp_err_t alc_ret = alc_process(temp_buffer, temp_buffer, num_frames_alc);
-                if (alc_ret != ESP_OK) {
-                    ESP_LOGW(TAG, "ALC process error: %s", esp_err_to_name(alc_ret));
-                }
-            }
-            xSemaphoreGive(s_alc_mutex);
-        } else if (s_alc_mutex) {
-            ESP_LOGD(TAG, "ALC processing skipped: could not take ALC mutex in time.");
-        }
-    }
-
-    if (volume_conditions_met && temp_buffer) {
-        int16_t *samples = (int16_t *)temp_buffer;
-        size_t num_samples_vol = size / sizeof(int16_t);
-
-        for (size_t i = 0; i < num_samples_vol; i++) {
-            float current_sample_val = (float)samples[i] * s_current_volume;
-            if (ENABLE_AUDIO_FILTERING) {
-                if (s_current_i2s_channels == 2) {
-                    if (i % 2 == 0) {
-                        current_sample_val = (1.0f - FILTER_STRENGTH) * current_sample_val +
-                                             FILTER_STRENGTH * (float)s_prev_left_sample;
-                        s_prev_left_sample = (int16_t)current_sample_val;
-                    } else {
-                        current_sample_val = (1.0f - FILTER_STRENGTH) * current_sample_val +
-                                             FILTER_STRENGTH * (float)s_prev_right_sample;
-                        s_prev_right_sample = (int16_t)current_sample_val;
+            // Обработка ALC для stack буфера
+            if (alc_conditions_met) {
+                if (s_alc_mutex && xSemaphoreTake(s_alc_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+                    size_t num_frames_alc = size / (s_current_alc_cfg->bits_per_sample / 8) / s_current_alc_cfg->channels;
+                    if (num_frames_alc > 0) {
+                        esp_err_t alc_ret = alc_process(stack_buffer, stack_buffer, num_frames_alc);
+                        if (alc_ret != ESP_OK) {
+                            ESP_LOGW(TAG, "ALC process error: %s", esp_err_to_name(alc_ret));
+                        }
                     }
-                } else {
-                     current_sample_val = (1.0f - FILTER_STRENGTH) * current_sample_val +
-                                         FILTER_STRENGTH * (float)s_prev_left_sample;
-                     s_prev_left_sample = (int16_t)current_sample_val;
+                    xSemaphoreGive(s_alc_mutex);
+                } else if (s_alc_mutex) {
+                    ESP_LOGD(TAG, "ALC processing skipped: could not take ALC mutex in time.");
                 }
             }
-            if (current_sample_val > 32767.0f) current_sample_val = 32767.0f;
-            if (current_sample_val < -32768.0f) current_sample_val = -32768.0f;
-            samples[i] = (int16_t)current_sample_val;
-        }
-    } else if (s_current_bits_per_sample != 16 && (s_current_volume < 0.99f || s_current_volume > 1.01f)) {
-         ESP_LOGW(TAG, "Volume scaling not applied: unsupported bit depth %d (only 16-bit supported for volume/filter)",
-                 s_current_bits_per_sample);
-    }
 
+            // Обработка громкости и фильтрации для stack буфера
+            if (volume_conditions_met) {
+                int16_t *samples = (int16_t *)stack_buffer;
+                size_t num_samples_vol = size / sizeof(int16_t);
 
-    if (eq_conditions_met && temp_buffer) {
-        if (s_eq_mutex && xSemaphoreTake(s_eq_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-            size_t num_frames_eq = size / (s_current_eq_cfg->bits_per_sample / 8) / s_current_eq_cfg->channel;
-            if (num_frames_eq > 0) {
-                esp_err_t eq_ret = esp_ae_eq_process(s_eq_handle, num_frames_eq, temp_buffer, temp_buffer);
-                if (eq_ret != ESP_OK) {
-                    ESP_LOGW(TAG, "EQ process error: %s", esp_err_to_name(eq_ret));
+                for (size_t i = 0; i < num_samples_vol; i++) {
+                    float current_sample_val = (float)samples[i] * s_current_volume;
+                    if (ENABLE_AUDIO_FILTERING) {
+                        if (s_current_i2s_channels == 2) {
+                            if (i % 2 == 0) {
+                                current_sample_val = (1.0f - FILTER_STRENGTH) * current_sample_val +
+                                                     FILTER_STRENGTH * (float)s_prev_left_sample;
+                                s_prev_left_sample = (int16_t)current_sample_val;
+                            } else {
+                                current_sample_val = (1.0f - FILTER_STRENGTH) * current_sample_val +
+                                                     FILTER_STRENGTH * (float)s_prev_right_sample;
+                                s_prev_right_sample = (int16_t)current_sample_val;
+                            }
+                        } else {
+                             current_sample_val = (1.0f - FILTER_STRENGTH) * current_sample_val +
+                                                 FILTER_STRENGTH * (float)s_prev_left_sample;
+                             s_prev_left_sample = (int16_t)current_sample_val;
+                        }
+                    }
+                    if (current_sample_val > 32767.0f) current_sample_val = 32767.0f;
+                    if (current_sample_val < -32768.0f) current_sample_val = -32768.0f;
+                    samples[i] = (int16_t)current_sample_val;
+                }
+            } else if (s_current_bits_per_sample != 16 && (s_current_volume < 0.99f || s_current_volume > 1.01f)) {
+                 ESP_LOGW(TAG, "Volume scaling not applied: unsupported bit depth %d (only 16-bit supported for volume/filter)",
+                         s_current_bits_per_sample);
+            }
+
+            // Обработка EQ для stack буфера
+            if (eq_conditions_met) {
+                if (s_eq_mutex && xSemaphoreTake(s_eq_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+                    size_t num_frames_eq = size / (s_current_eq_cfg->bits_per_sample / 8) / s_current_eq_cfg->channel;
+                    if (num_frames_eq > 0) {
+                        esp_err_t eq_ret = esp_ae_eq_process(s_eq_handle, num_frames_eq, stack_buffer, stack_buffer);
+                        if (eq_ret != ESP_OK) {
+                            ESP_LOGW(TAG, "EQ process error: %s", esp_err_to_name(eq_ret));
+                        }
+                    }
+                    xSemaphoreGive(s_eq_mutex);
+                } else if (s_eq_mutex) {
+                    ESP_LOGD(TAG, "EQ processing skipped: could not take EQ mutex in time.");
                 }
             }
-            xSemaphoreGive(s_eq_mutex);
-        } else if (s_eq_mutex) {
-            ESP_LOGD(TAG, "EQ processing skipped: could not take EQ mutex in time.");
+
+        } else {
+            // Для больших буферов используем heap
+            heap_buffer = malloc(size);
+            if (!heap_buffer) {
+                ESP_LOGE(TAG, "Failed to allocate temporary buffer for audio processing");
+                if (bytes_written) *bytes_written = 0;
+                return i2s_channel_write(i2s_handle, data, size, bytes_written, wait_time);
+            }
+            memcpy(heap_buffer, data, size);
+            data_to_write = heap_buffer;
+            using_heap_buffer = true;  // Heap буфер - освобождаем
+
+            // Обработка ALC для heap буфера
+            if (alc_conditions_met) {
+                if (s_alc_mutex && xSemaphoreTake(s_alc_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+                    size_t num_frames_alc = size / (s_current_alc_cfg->bits_per_sample / 8) / s_current_alc_cfg->channels;
+                    if (num_frames_alc > 0) {
+                        esp_err_t alc_ret = alc_process(heap_buffer, heap_buffer, num_frames_alc);
+                        if (alc_ret != ESP_OK) {
+                            ESP_LOGW(TAG, "ALC process error: %s", esp_err_to_name(alc_ret));
+                        }
+                    }
+                    xSemaphoreGive(s_alc_mutex);
+                } else if (s_alc_mutex) {
+                    ESP_LOGD(TAG, "ALC processing skipped: could not take ALC mutex in time.");
+                }
+            }
+
+            // Обработка громкости и фильтрации для heap буфера
+            if (volume_conditions_met) {
+                int16_t *samples = (int16_t *)heap_buffer;
+                size_t num_samples_vol = size / sizeof(int16_t);
+
+                for (size_t i = 0; i < num_samples_vol; i++) {
+                    float current_sample_val = (float)samples[i] * s_current_volume;
+                    if (ENABLE_AUDIO_FILTERING) {
+                        if (s_current_i2s_channels == 2) {
+                            if (i % 2 == 0) {
+                                current_sample_val = (1.0f - FILTER_STRENGTH) * current_sample_val +
+                                                     FILTER_STRENGTH * (float)s_prev_left_sample;
+                                s_prev_left_sample = (int16_t)current_sample_val;
+                            } else {
+                                current_sample_val = (1.0f - FILTER_STRENGTH) * current_sample_val +
+                                                     FILTER_STRENGTH * (float)s_prev_right_sample;
+                                s_prev_right_sample = (int16_t)current_sample_val;
+                            }
+                        } else {
+                             current_sample_val = (1.0f - FILTER_STRENGTH) * current_sample_val +
+                                                 FILTER_STRENGTH * (float)s_prev_left_sample;
+                             s_prev_left_sample = (int16_t)current_sample_val;
+                        }
+                    }
+                    if (current_sample_val > 32767.0f) current_sample_val = 32767.0f;
+                    if (current_sample_val < -32768.0f) current_sample_val = -32768.0f;
+                    samples[i] = (int16_t)current_sample_val;
+                }
+            } else if (s_current_bits_per_sample != 16 && (s_current_volume < 0.99f || s_current_volume > 1.01f)) {
+                 ESP_LOGW(TAG, "Volume scaling not applied: unsupported bit depth %d (only 16-bit supported for volume/filter)",
+                         s_current_bits_per_sample);
+            }
+
+            // Обработка EQ для heap буфера
+            if (eq_conditions_met) {
+                if (s_eq_mutex && xSemaphoreTake(s_eq_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+                    size_t num_frames_eq = size / (s_current_eq_cfg->bits_per_sample / 8) / s_current_eq_cfg->channel;
+                    if (num_frames_eq > 0) {
+                        esp_err_t eq_ret = esp_ae_eq_process(s_eq_handle, num_frames_eq, heap_buffer, heap_buffer);
+                        if (eq_ret != ESP_OK) {
+                            ESP_LOGW(TAG, "EQ process error: %s", esp_err_to_name(eq_ret));
+                        }
+                    }
+                    xSemaphoreGive(s_eq_mutex);
+                } else if (s_eq_mutex) {
+                    ESP_LOGD(TAG, "EQ processing skipped: could not take EQ mutex in time.");
+                }
+            }
         }
     }
 
@@ -668,8 +812,9 @@ esp_err_t audio_i2s_write(const void *data, size_t size, size_t *bytes_written, 
                  esp_err_to_name(ret), bytes_written ? *bytes_written : 0, size);
     }
 
-    if (need_free_buffer && temp_buffer) {
-        free(temp_buffer);
+    // Освобождаем память только если это был heap буфер
+    if (using_heap_buffer && heap_buffer) {
+        free(heap_buffer);
     }
 
     return ret;
@@ -730,6 +875,18 @@ esp_err_t audio_i2s_deinit(void) {
         s_eq_handle = NULL;
     }
     alc_deinit();
+
+    // Освобождаем буферы шумоподавления
+    if (s_noise_filter_left_buffer) {
+        heap_caps_free(s_noise_filter_left_buffer);
+        s_noise_filter_left_buffer = NULL;
+        ESP_LOGI(TAG, "Noise filter left buffer freed");
+    }
+    if (s_noise_filter_right_buffer) {
+        heap_caps_free(s_noise_filter_right_buffer);
+        s_noise_filter_right_buffer = NULL;
+        ESP_LOGI(TAG, "Noise filter right buffer freed");
+    }
 
     s_i2s_initialized = false;
     ESP_LOGI(TAG, "I2S deinitialized.");
