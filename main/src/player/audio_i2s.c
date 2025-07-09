@@ -46,7 +46,7 @@
 #define NOISE_FILTER_BUFFER_SIZE 128
 
 // Максимальный размер буфера для использования stack вместо heap
-#define MAX_STACK_BUFFER_SIZE 1024
+#define MAX_STACK_BUFFER_SIZE 512
 
 // Буферы в PSRAM (если доступна) или динамические
 static int16_t *s_noise_filter_left_buffer = NULL;

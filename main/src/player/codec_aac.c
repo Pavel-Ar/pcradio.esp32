@@ -19,39 +19,77 @@ typedef struct {
 static codec_aac_internal_buffer_t s_codec_aac_raw_buffer = {0};
 static uint8_t *s_codec_aac_pcm_buffer = NULL;
 
-#define CODEC_AAC_INTERNAL_PCM_BUFFER_SIZE (16384)
+#define CODEC_AAC_INTERNAL_PCM_BUFFER_SIZE (4096)
 
 esp_err_t codec_aac_init_buffers(uint32_t raw_buffer_capacity) {
+    ESP_LOGI(TAG, "Checking available memory before AAC buffer allocation...");
+    size_t free_heap = esp_get_free_heap_size();
+    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    size_t largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    size_t largest_psram_block = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "Available memory: heap=%zu, PSRAM=%zu", free_heap, free_psram);
+    ESP_LOGI(TAG, "Largest contiguous blocks: heap=%zu, PSRAM=%zu", largest_free_block, largest_psram_block);
+
+    if (raw_buffer_capacity > 16384) {
+        ESP_LOGW(TAG, "Requested raw buffer size %" PRIu32 " is too large, limiting to 16KB", raw_buffer_capacity);
+        raw_buffer_capacity = 16384;
+    }
+
     if (s_codec_aac_raw_buffer.buffer) {
         heap_caps_free(s_codec_aac_raw_buffer.buffer);
         s_codec_aac_raw_buffer.buffer = NULL;
     }
+
     s_codec_aac_raw_buffer.buffer = heap_caps_malloc(raw_buffer_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_codec_aac_raw_buffer.buffer) {
-        ESP_LOGE(TAG, "Failed to allocate AAC raw data buffer (%" PRIu32 " bytes)", raw_buffer_capacity);
-        return ESP_ERR_NO_MEM;
+        ESP_LOGW(TAG, "Failed to allocate AAC raw buffer in PSRAM, trying regular heap");
+        s_codec_aac_raw_buffer.buffer = malloc(raw_buffer_capacity);
+        if (!s_codec_aac_raw_buffer.buffer) {
+            ESP_LOGE(TAG, "Failed to allocate AAC raw data buffer (%" PRIu32 " bytes)", raw_buffer_capacity);
+            return ESP_ERR_NO_MEM;
+        }
+        ESP_LOGI(TAG, "AAC raw data buffer allocated in regular heap (%" PRIu32 " bytes)", raw_buffer_capacity);
+    } else {
+        ESP_LOGI(TAG, "AAC raw data buffer allocated in PSRAM (%" PRIu32 " bytes)", raw_buffer_capacity);
     }
+
     s_codec_aac_raw_buffer.capacity = raw_buffer_capacity;
     s_codec_aac_raw_buffer.size = 0;
-    ESP_LOGI(TAG, "AAC raw data buffer initialized with capacity %" PRIu32 " bytes in PSRAM", raw_buffer_capacity);
 
     if (s_codec_aac_pcm_buffer) {
         heap_caps_free(s_codec_aac_pcm_buffer);
         s_codec_aac_pcm_buffer = NULL;
     }
+
     s_codec_aac_pcm_buffer = heap_caps_malloc(CODEC_AAC_INTERNAL_PCM_BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_codec_aac_pcm_buffer) {
-        ESP_LOGE(TAG, "Failed to allocate AAC PCM buffer (%d bytes)", CODEC_AAC_INTERNAL_PCM_BUFFER_SIZE);
-        heap_caps_free(s_codec_aac_raw_buffer.buffer);
-        s_codec_aac_raw_buffer.buffer = NULL;
-        return ESP_ERR_NO_MEM;
+        ESP_LOGW(TAG, "Failed to allocate AAC PCM buffer in PSRAM, trying regular heap");
+        s_codec_aac_pcm_buffer = malloc(CODEC_AAC_INTERNAL_PCM_BUFFER_SIZE);
+        if (!s_codec_aac_pcm_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate AAC PCM buffer (%d bytes)", CODEC_AAC_INTERNAL_PCM_BUFFER_SIZE);
+            if (s_codec_aac_raw_buffer.buffer) {
+                heap_caps_free(s_codec_aac_raw_buffer.buffer);
+                s_codec_aac_raw_buffer.buffer = NULL;
+            }
+            return ESP_ERR_NO_MEM;
+        }
+        ESP_LOGI(TAG, "AAC PCM buffer allocated in regular heap (%d bytes)", CODEC_AAC_INTERNAL_PCM_BUFFER_SIZE);
+    } else {
+        ESP_LOGI(TAG, "AAC PCM buffer allocated in PSRAM (%d bytes)", CODEC_AAC_INTERNAL_PCM_BUFFER_SIZE);
     }
-    ESP_LOGI(TAG, "AAC PCM buffer initialized with capacity %d bytes in PSRAM", CODEC_AAC_INTERNAL_PCM_BUFFER_SIZE);
+
+    free_heap = esp_get_free_heap_size();
+    free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "Memory after AAC buffer allocation: heap=%zu, PSRAM=%zu", free_heap, free_psram);
+
     return ESP_OK;
 }
 
 void codec_aac_deinit_buffers() {
     ESP_LOGI(TAG, "Deinitializing AAC buffers...");
+
+    size_t free_heap_before = esp_get_free_heap_size();
+    size_t free_psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 
     if (s_codec_aac_raw_buffer.buffer) {
         heap_caps_free(s_codec_aac_raw_buffer.buffer);
@@ -66,6 +104,14 @@ void codec_aac_deinit_buffers() {
         s_codec_aac_pcm_buffer = NULL;
         ESP_LOGI(TAG, "AAC PCM buffer freed");
     }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    size_t free_heap_after = esp_get_free_heap_size();
+    size_t free_psram_after = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "Memory freed by buffer cleanup: heap=%zd, PSRAM=%zd",
+             free_heap_after - free_heap_before,
+             free_psram_after - free_psram_before);
 
     ESP_LOGI(TAG, "AAC buffers deinitialization completed");
 }
@@ -239,30 +285,90 @@ esp_err_t codec_open_aac_decoder(esp_audio_dec_handle_t *handle_out) {
     if (handle_out == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    size_t free_heap = esp_get_free_heap_size();
+    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    size_t largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    ESP_LOGI(TAG, "Memory before opening AAC decoder: heap=%zu, PSRAM=%zu, largest_block=%zu",
+             free_heap, free_psram, largest_free_block);
+
+    if (free_heap < 32768 || largest_free_block < 16384) {
+        ESP_LOGW(TAG, "Low heap memory (heap=%zu, largest_block=%zu), attempting memory defragmentation",
+                 free_heap, largest_free_block);
+
+        for (int i = 0; i < 20; i++) {
+            void* temp = malloc(1024);
+            if (temp) {
+                free(temp);
+            }
+            vTaskDelay(5 / portTICK_PERIOD_MS);
+        }
+
+        free_heap = esp_get_free_heap_size();
+        largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        ESP_LOGI(TAG, "After defragmentation: heap=%zu, largest_block=%zu", free_heap, largest_free_block);
+    }
+
     ESP_LOGI(TAG, "Opening AAC decoder instance (expecting ADTS headers).");
 
-    esp_audio_dec_cfg_t general_dec_cfg = {0};
-    general_dec_cfg.type = ESP_AUDIO_TYPE_AAC;
+    esp_err_t ret;
+    esp_audio_dec_handle_t decoder_handle = NULL;
 
-    esp_aac_dec_cfg_t aac_specific_cfg = {0};
-    aac_specific_cfg.no_adts_header = false;
-    aac_specific_cfg.aac_plus_enable = false;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+            ESP_LOGW(TAG, "AAC decoder open attempt #%d after cleanup", attempt + 1);
 
-    general_dec_cfg.cfg = &aac_specific_cfg;
-    general_dec_cfg.cfg_sz = sizeof(esp_aac_dec_cfg_t);
+            vTaskDelay(pdMS_TO_TICKS(50));
 
-    ESP_LOGI(TAG, "AAC decoder config: no_adts_header=%d, aac_plus_enable=%d",
-             (int)aac_specific_cfg.no_adts_header,
-             (int)aac_specific_cfg.aac_plus_enable);
+            heap_caps_malloc_extmem_enable(1024);
 
-    esp_err_t ret = esp_audio_dec_open(&general_dec_cfg, handle_out);
+            free_heap = esp_get_free_heap_size();
+            largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+            ESP_LOGI(TAG, "Before retry: heap=%zu, largest_block=%zu", free_heap, largest_free_block);
+        }
+
+        esp_audio_dec_cfg_t general_dec_cfg = {0};
+        general_dec_cfg.type = ESP_AUDIO_TYPE_AAC;
+
+        esp_aac_dec_cfg_t aac_specific_cfg = {0};
+        aac_specific_cfg.no_adts_header = false;
+        aac_specific_cfg.aac_plus_enable = false;
+
+        general_dec_cfg.cfg = &aac_specific_cfg;
+        general_dec_cfg.cfg_sz = sizeof(esp_aac_dec_cfg_t);
+
+        ESP_LOGI(TAG, "AAC decoder config: no_adts_header=%d, aac_plus_enable=%d",
+                 (int)aac_specific_cfg.no_adts_header,
+                 (int)aac_specific_cfg.aac_plus_enable);
+
+        ret = esp_audio_dec_open(&general_dec_cfg, &decoder_handle);
+        if (ret == ESP_OK) {
+            break;
+        } else {
+            ESP_LOGW(TAG, "AAC decoder open attempt #%d failed: %s (code %d)",
+                     attempt + 1, esp_err_to_name(ret), ret);
+            if (decoder_handle) {
+                esp_audio_dec_close(decoder_handle);
+                decoder_handle = NULL;
+            }
+        }
+    }
+
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open AAC decoder: %s (code %d)", esp_err_to_name(ret), ret);
+        ESP_LOGE(TAG, "Failed to open AAC decoder after all attempts: %s (code %d)", esp_err_to_name(ret), ret);
+        free_heap = esp_get_free_heap_size();
+        free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        ESP_LOGE(TAG, "Memory after failed AAC decoder open: heap=%zu, PSRAM=%zu", free_heap, free_psram);
         *handle_out = NULL;
         return ret;
     }
 
+    *handle_out = decoder_handle;
+
+    free_heap = esp_get_free_heap_size();
+    free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     ESP_LOGI(TAG, "AAC decoder opened successfully, handle: %p", *handle_out);
+    ESP_LOGI(TAG, "Memory after AAC decoder open: heap=%zu, PSRAM=%zu", free_heap, free_psram);
     return ESP_OK;
 }
 
@@ -308,16 +414,39 @@ esp_err_t codec_aac_unregister_decoder(void) {
 
     ESP_LOGI(TAG, "Unregistering AAC decoder from the system.");
 
+    size_t free_heap_before = esp_get_free_heap_size();
+    size_t free_psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "Memory before AAC decoder unregister: heap=%zu, PSRAM=%zu", free_heap_before, free_psram_before);
+
     ESP_LOGI(TAG, "Attempting to unregister AAC decoder...");
     esp_audio_dec_unregister(ESP_AUDIO_TYPE_AAC);
     ESP_LOGI(TAG, "AAC decoder unregistered successfully");
 
     s_aac_decoder_registered = false;
+
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    size_t free_heap_after = esp_get_free_heap_size();
+    size_t free_psram_after = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "Memory after AAC decoder unregister: heap=%zu, PSRAM=%zu", free_heap_after, free_psram_after);
+    ESP_LOGI(TAG, "Memory freed: heap=%zd, PSRAM=%zd",
+             free_heap_after - free_heap_before,
+             free_psram_after - free_psram_before);
+
+    if (free_heap_after < free_heap_before) {
+        ESP_LOGW(TAG, "Memory leak detected after AAC unregister: heap decreased by %zd bytes",
+                 free_heap_before - free_heap_after);
+    }
+
     return ESP_OK;
 }
 
 esp_err_t codec_deinit_aac_decoder(void) {
     ESP_LOGI(TAG, "Deinitializing AAC decoder...");
+
+    size_t free_heap_before = esp_get_free_heap_size();
+    size_t free_psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "Memory before AAC deinit: heap=%zu, PSRAM=%zu", free_heap_before, free_psram_before);
 
     codec_aac_deinit_buffers();
 
@@ -325,6 +454,15 @@ esp_err_t codec_deinit_aac_decoder(void) {
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to unregister AAC decoder during deinit: %s", esp_err_to_name(ret));
     }
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    size_t free_heap_after = esp_get_free_heap_size();
+    size_t free_psram_after = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "Memory after complete AAC deinit: heap=%zu, PSRAM=%zu", free_heap_after, free_psram_after);
+    ESP_LOGI(TAG, "Total memory freed: heap=%zd, PSRAM=%zd",
+             free_heap_after - free_heap_before,
+             free_psram_after - free_psram_before);
 
     ESP_LOGI(TAG, "AAC decoder deinitialization completed");
     return ESP_OK;
