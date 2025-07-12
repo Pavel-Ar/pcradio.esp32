@@ -79,26 +79,24 @@ curl -X POST http://<ip>/api/player -H "Content-Type: application/json" -d "stop
 
 Memory Type Usage Summary
 
-| Memory Type/Section   | Used [bytes] | Used [%] | Remain [bytes] | Total [bytes] |
-|-----------------------|-------------:|---------:|---------------:|--------------:|
-| Flash Code            |       914990 |          |                |               |
-|   .text               |       914990 |          |                |               |
-| Flash Data            |       244872 |          |                |               |
-|   .rodata             |       230676 |          |                |               |
-|   .bss                |        13940 |          |                |               |
-|   .appdesc            |          256 |          |                |               |
-| DIRAM                 |       117571 |     34.4 |         224189 |        341760 |
-|   .text               |        87299 |    25.54 |                |               |
-|   .data               |        21792 |     6.38 |                |               |
-|   .bss                |         8480 |     2.48 |                |               |
-| IRAM                  |        16383 |    99.99 |              1 |         16384 |
-|   .text               |        15356 |    93.73 |                |               |
-|   .vectors            |         1027 |     6.27 |                |               |
-| RTC FAST              |           52 |     0.63 |           8140 |          8192 |
-|   .force_fast         |           28 |     0.34 |                |               |
-|   .rtc_reserved       |           24 |     0.29 |                |               |
+| Memory Type/Section | Used [bytes] | Used [%] | Remain [bytes] | Total [bytes] |
+|---------------------|-------------:|---------:|---------------:|--------------:|
+| Flash Code          |       814272 |          |                |               |
+|   .text             |       814272 |          |                |               |
+| Flash Data          |       231648 |          |                |               |
+|   .rodata           |       217460 |          |                |               |
+|   .bss              |        13932 |          |                |               |
+|   .appdesc          |          256 |          |                |               |
+| DIRAM               |        77934 |     22.8 |         263826 |        341760 |
+|   .text             |        51955 |     15.2 |                |               |
+|   .data             |        20632 |     6.04 |                |               |
+|   .bss              |         4320 |     1.26 |                |               |
+|   .vectors          |         1027 |      0.3 |                |               |
+| RTC FAST            |           52 |     0.63 |           8140 |          8192 |
+|   .force_fast       |           28 |     0.34 |                |               |
+|   .rtc_reserved     |           24 |     0.29 |                |               |
 
-Total image size: 1271424 bytes (.bin may be padded larger)
+Total image size: 1105630 bytes (.bin may be padded larger)
 
 
 <details><summary>Monitor log</summary>
