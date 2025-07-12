@@ -39,7 +39,7 @@
 #define HIGH_FREQ_NOISE_REDUCTION_RATIO 0.4f                      // Коэффициент подавления для высоких частот 0.8f
 
 // Оптимизируем DMA буферы для экономии DIRAM
-#define DMA_BUF_COUNT   20
+#define DMA_BUF_COUNT   28
 #define DMA_BUF_LEN     1024
 
 // Уменьшаем размер буферов для экономии DIRAM
