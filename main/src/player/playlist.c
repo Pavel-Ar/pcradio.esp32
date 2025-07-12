@@ -62,7 +62,7 @@ static esp_err_t download_playlist_file() {
         .use_global_ca_store = false,
         .skip_cert_common_name_check = true,
         .timeout_ms = 30000,
-        .buffer_size = 4096,
+        .buffer_size = 2048,
         .transport_type = HTTP_TRANSPORT_OVER_SSL,
         .keep_alive_enable = false,
     };
@@ -118,14 +118,22 @@ static esp_err_t download_playlist_file() {
         return ESP_FAIL;
     }
 
-    char buffer[2048];
+    char *buffer = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+    if (!buffer) {
+        ESP_LOGE(TAG, "Failed to allocate download buffer in PSRAM");
+        fclose(f);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_ERR_NO_MEM;
+    }
+
     int total_read_len = 0;
     int read_len;
     err = ESP_OK;
 
     ESP_LOGI(TAG, "Downloading playlist body...");
     while (true) {
-        read_len = esp_http_client_read(client, buffer, sizeof(buffer));
+        read_len = esp_http_client_read(client, buffer, 4096);
         if (read_len < 0) {
             ESP_LOGE(TAG, "Error during HTTP read: %s", esp_err_to_name(esp_http_client_get_errno(client)));
             err = ESP_FAIL;
@@ -160,6 +168,9 @@ static esp_err_t download_playlist_file() {
 
     fclose(f);
     f = NULL;
+
+    heap_caps_free(buffer);
+    buffer = NULL;
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
@@ -198,7 +209,13 @@ static esp_err_t index_playlist_file() {
         return ESP_FAIL;
     }
 
-    char line[MAX_LINE_LENGTH];
+    char *line = heap_caps_malloc(MAX_LINE_LENGTH, MALLOC_CAP_SPIRAM);
+    if (!line) {
+        ESP_LOGE(TAG, "Failed to allocate line buffer in PSRAM");
+        fclose(f);
+        return ESP_ERR_NO_MEM;
+    }
+
     long current_offset = 0;
 
     if (s_channel_index) {
@@ -209,10 +226,11 @@ static esp_err_t index_playlist_file() {
     s_channel_capacity = 0;
 
     current_offset = ftell(f);
-    while (fgets(line, sizeof(line), f)) {
+    while (fgets(line, MAX_LINE_LENGTH, f)) {
         if (strncmp(line, "#EXTINF:", strlen("#EXTINF:")) == 0) {
             esp_err_t add_err = add_channel_to_index(current_offset);
             if (add_err != ESP_OK) {
+                heap_caps_free(line);
                 fclose(f);
                 if (s_channel_index) {
                     heap_caps_free(s_channel_index);
@@ -230,6 +248,7 @@ static esp_err_t index_playlist_file() {
         }
     }
 
+    heap_caps_free(line);
     fclose(f);
     ESP_LOGI(TAG, "Playlist indexed. Found %d channels.", s_channel_count);
     if (s_channel_count == 0) {
@@ -392,11 +411,17 @@ esp_err_t playlist_get_channel_data(int channel_number, playlist_channel_data_t 
         return ESP_FAIL;
     }
 
-    char line_buffer[MAX_LINE_LENGTH];
+    char *line_buffer = heap_caps_malloc(MAX_LINE_LENGTH, MALLOC_CAP_SPIRAM);
+    if (!line_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate line buffer in PSRAM");
+        fclose(f);
+        return ESP_ERR_NO_MEM;
+    }
+
     bool inf_read = false;
     bool url_read = false;
 
-    if (fgets(line_buffer, sizeof(line_buffer), f)) {
+    if (fgets(line_buffer, MAX_LINE_LENGTH, f)) {
         line_buffer[strcspn(line_buffer, "\r\n")] = 0;
 
         if (strncmp(line_buffer, "#EXTINF:", strlen("#EXTINF:")) == 0) {
@@ -412,7 +437,7 @@ esp_err_t playlist_get_channel_data(int channel_number, playlist_channel_data_t 
         goto read_error;
     }
 
-    while (fgets(line_buffer, sizeof(line_buffer), f)) {
+    while (fgets(line_buffer, MAX_LINE_LENGTH, f)) {
         line_buffer[strcspn(line_buffer, "\r\n")] = 0;
 
         if (strncmp(line_buffer, "#EXTVLCOPT:", strlen("#EXTVLCOPT:")) == 0) {
@@ -433,6 +458,7 @@ esp_err_t playlist_get_channel_data(int channel_number, playlist_channel_data_t 
         }
     }
 
+    heap_caps_free(line_buffer);
     fclose(f);
 
     if (!inf_read || !url_read) {
@@ -447,6 +473,7 @@ esp_err_t playlist_get_channel_data(int channel_number, playlist_channel_data_t 
 mem_error:
     ESP_LOGE(TAG, "Memory allocation failed while reading channel data.");
 read_error:
+    if (line_buffer) heap_caps_free(line_buffer);
     if (f) fclose(f);
     playlist_free_channel_data(channel_data);
     return ESP_ERR_NO_MEM;
