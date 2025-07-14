@@ -17,7 +17,7 @@
 #define SNTP_TASK_STACK_SIZE            (4096)
 #define SNTP_TASK_NAME                  "sntp_task"
 
-static const char *TAG = "ntp_module";
+static const char *TAG = "NTP";
 static bool s_time_initialized = false;
 
 static void time_sync_notification_cb(struct timeval *tv) {
