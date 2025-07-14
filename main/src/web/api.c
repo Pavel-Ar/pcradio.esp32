@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 #include "config.h"
 #include "www.h"
+#include "metrics.h"
 
 #define TAG "API"
 
@@ -352,6 +353,14 @@ static esp_err_t api_server_start_internal(void) {
         ESP_LOGE(TAG, "Failed to register www handlers: %s", esp_err_to_name(www_ret));
     } else {
         ESP_LOGI(TAG, "Successfully registered www handlers.");
+    }
+
+    // Регистрируем обработчик метрик Prometheus
+    esp_err_t metrics_ret = metrics_register_handler(server);
+    if (metrics_ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register metrics handler: %s", esp_err_to_name(metrics_ret));
+    } else {
+        ESP_LOGI(TAG, "Successfully registered metrics handler at /metrics.");
     }
 
     ESP_LOGI(TAG, "API server started");

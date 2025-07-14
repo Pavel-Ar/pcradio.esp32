@@ -18,6 +18,7 @@ set(COMPONENT_SRC
 
     "src/web/api.c"
     "src/web/www.c"
+    "src/web/metrics.c"
 )
 
 set(COMPONENT_INCLUDE_DIRS
