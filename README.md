@@ -74,3 +74,5 @@ curl -X POST http://<ip>/api/eq -H "Content-Type: application/json" -d "5"
 ```bash
 curl -X POST http://<ip>/api/player -H "Content-Type: application/json" -d "stop"
 ```
+
+[3D ESP32 PCRadio box](https://www.thingiverse.com/thing:7091753)
